@@ -15,6 +15,8 @@ require_once __DIR__ . '/config/db.php';
 require_once __DIR__ . '/config/auth.php';
 require_once __DIR__ . '/config/helpers.php';
 require_once __DIR__ . '/config/incidencias_helpers.php';
+require_once __DIR__ . '/config/notificaciones_helpers.php';
+require_once __DIR__ . '/config/inteligencia_helpers.php';
 
 requerir_login();
 
@@ -138,6 +140,22 @@ if (es_post()) {
 
                 // Si hay técnico asignado, registrar fecha_atencion = ahora
                 $fecha_atencion = null;
+                $regla_aplicada = null;
+
+                // Si NO eligió técnico manualmente, evaluar reglas de auto-asignación
+                if (!$valores['asignado_a_id']) {
+                    $regla_aplicada = evaluar_reglas_asignacion(
+                        (int) $valores['sucursal_id'],
+                        $valores['area_id'] ? (int) $valores['area_id'] : null,
+                        $valores['categoria_id'] ? (int) $valores['categoria_id'] : null,
+                        $valores['tipo_trabajo_id'] ? (int) $valores['tipo_trabajo_id'] : null,
+                        $valores['severidad_id'] ? (int) $valores['severidad_id'] : null
+                    );
+                    if ($regla_aplicada) {
+                        $valores['asignado_a_id'] = $regla_aplicada['asignar_a_id'];
+                    }
+                }
+
                 if ($valores['asignado_a_id']) {
                     $fecha_atencion = date('Y-m-d H:i:s');
                 }
@@ -225,6 +243,26 @@ if (es_post()) {
                 db()->commit();
                 registrar_auditoria('crear_incidencia', 'incidencias', $incidencia_id, "Folio $folio");
 
+                // Si se aplicó una regla de auto-asignación, registrarlo
+                if ($regla_aplicada) {
+                    registrar_uso_regla((int) $regla_aplicada['regla_id']);
+                    registrar_auditoria('aplicar_regla', 'incidencias', $incidencia_id,
+                        "Auto-asignado a {$regla_aplicada['asignado_nombre']} por regla \"{$regla_aplicada['regla_nombre']}\"");
+                    flash_set('info', "Auto-asignado a {$regla_aplicada['asignado_nombre']} (regla: {$regla_aplicada['regla_nombre']})");
+                }
+
+                // === Disparo de notificaciones automáticas ===
+                // Si se asignó técnico al crear, notificarle
+                if ($valores['asignado_a_id']) {
+                    notificar_asignacion($incidencia_id, (int) $valores['asignado_a_id'], (int) $u['id']);
+                }
+                // Si es reincidencia con padre identificada, notificar a involucrados de la padre
+                if ($valores['es_reincidencia'] && $valores['incidencia_padre_id']) {
+                    notificar_reincidencia($incidencia_id, (int) $valores['incidencia_padre_id']);
+                }
+                // Si es crítica (nivel 1), notificar a todos los ingenieros con acceso
+                notificar_critica_nueva($incidencia_id);
+
                 $msg = "Incidencia $folio creada correctamente.";
                 if (!empty($errores_adjuntos)) {
                     $msg .= " Hubo problemas con algunos adjuntos: " . implode(' ', $errores_adjuntos);
@@ -277,6 +315,50 @@ require_once __DIR__ . '/config/header.php';
     </div>
     <?php endif; ?>
 
+    <!-- Selector de plantillas (acelera el llenado) -->
+    <div class="bg-gradient-to-br from-bacal-50 to-white rounded-xl border border-bacal-200 shadow-sm p-5 mb-5"
+         x-data="{ abierto: false, plantillas: [], cargadas: false }"
+         x-init="async () => {
+             try {
+                 const resp = await fetch('<?= url('api/plantillas_listar.php') ?>', { credentials: 'same-origin' });
+                 if (resp.ok) plantillas = await resp.json();
+             } catch(e) { console.error(e); }
+             cargadas = true;
+             $nextTick(() => { if (window.lucide) window.lucide.createIcons(); });
+         }">
+        <button type="button" @click="abierto = !abierto" class="w-full flex items-center justify-between">
+            <div class="flex items-center gap-2 text-left">
+                <div class="w-9 h-9 rounded-lg bg-bacal-700 text-white flex items-center justify-center flex-shrink-0">
+                    <i data-lucide="layout-template" class="w-4 h-4"></i>
+                </div>
+                <div>
+                    <div class="font-display font-bold text-sm text-zinc-900">¿Es un problema común?</div>
+                    <div class="text-[11px] text-zinc-500">Usa una plantilla para pre-llenar el formulario y ahorrar tiempo</div>
+                </div>
+            </div>
+            <i data-lucide="chevron-down" class="w-4 h-4 text-zinc-400 transition-transform" :class="abierto ? 'rotate-180' : ''"></i>
+        </button>
+
+        <div x-show="abierto" x-cloak x-transition class="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+            <template x-for="p in plantillas" :key="p.id">
+                <button type="button" @click="window.__aplicarPlantilla && window.__aplicarPlantilla(p); abierto = false"
+                        class="flex items-center gap-2.5 p-2.5 bg-white border border-zinc-200 rounded-lg hover:border-bacal-400 hover:shadow-sm transition-all text-left">
+                    <div class="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+                         :style="`background-color: ${p.color}15`">
+                        <i :data-lucide="p.icono" class="w-4 h-4" :style="`color: ${p.color}`"></i>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <div class="font-semibold text-xs text-zinc-900 truncate" x-text="p.nombre"></div>
+                        <div class="text-[10px] text-zinc-500 truncate" x-text="p.descripcion"></div>
+                    </div>
+                </button>
+            </template>
+            <template x-if="cargadas && plantillas.length === 0">
+                <div class="col-span-full text-center py-4 text-xs text-zinc-400 italic">No hay plantillas configuradas. Pídele al admin que cree algunas.</div>
+            </template>
+        </div>
+    </div>
+
     <form method="POST" enctype="multipart/form-data" class="space-y-5" x-ref="formulario">
         <?= csrf_input() ?>
         <input type="hidden" name="incidencia_padre_id" :value="incidenciaPadreId" x-model="incidenciaPadreId">
@@ -291,14 +373,94 @@ require_once __DIR__ . '/config/header.php';
                 <div class="md:col-span-2">
                     <label class="block text-xs font-bold text-zinc-700 mb-1 uppercase tracking-wide">Título *</label>
                     <input type="text" name="titulo" required maxlength="255"
-                           value="<?= e((string) $valores['titulo']) ?>"
+                           x-model="titulo"
+                           @input.debounce.500ms="cargarSugerencias(); sugerirCategoria()"
                            placeholder="Ej. Falla en impresora de tickets caja 2"
                            class="w-full px-3 py-2 rounded-lg border border-zinc-300 bg-white text-sm focus:outline-none focus:border-bacal-700 focus:ring-2 focus:ring-bacal-100">
+
+                    <!-- Bloque de sugerencias en vivo -->
+                    <div x-show="mostrarSugerencias && (sugerencias.plantillas.length > 0 || sugerencias.soluciones.length > 0 || sugerencias.tecnicos.length > 0)"
+                         x-cloak x-transition
+                         class="mt-3 p-4 bg-gradient-to-br from-blue-50 to-purple-50 border border-blue-200 rounded-lg space-y-3">
+
+                        <div class="flex items-center justify-between">
+                            <h4 class="text-xs font-bold text-blue-900 flex items-center gap-1.5">
+                                <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+                                Sugerencias basadas en lo que escribiste
+                            </h4>
+                            <button type="button" @click="mostrarSugerencias = false"
+                                    class="text-blue-400 hover:text-blue-700 text-xs">
+                                <i data-lucide="x" class="w-3.5 h-3.5"></i>
+                            </button>
+                        </div>
+
+                        <!-- Plantillas similares -->
+                        <div x-show="sugerencias.plantillas.length > 0">
+                            <div class="text-[10px] font-bold text-blue-700 uppercase tracking-wide mb-1.5">📋 Plantillas similares</div>
+                            <div class="space-y-1.5">
+                                <template x-for="p in sugerencias.plantillas" :key="'p' + p.id">
+                                    <button type="button" @click="usarSugerenciaPlantilla(p)"
+                                            class="block w-full text-left px-3 py-2 bg-white rounded border border-blue-200 hover:border-blue-400 hover:shadow-sm transition-all">
+                                        <div class="flex items-center justify-between gap-2">
+                                            <div class="flex-1 min-w-0">
+                                                <div class="text-xs font-semibold text-zinc-900" x-text="p.nombre"></div>
+                                                <div class="text-[10px] text-zinc-500 truncate" x-text="p.titulo"></div>
+                                            </div>
+                                            <i data-lucide="arrow-right" class="w-3.5 h-3.5 text-blue-500 flex-shrink-0"></i>
+                                        </div>
+                                    </button>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Soluciones de incidencias previas -->
+                        <div x-show="sugerencias.soluciones.length > 0">
+                            <div class="text-[10px] font-bold text-purple-700 uppercase tracking-wide mb-1.5">💡 Soluciones aplicadas en casos similares</div>
+                            <div class="space-y-1.5">
+                                <template x-for="s in sugerencias.soluciones" :key="'s' + s.id">
+                                    <div class="block px-3 py-2 bg-white rounded border border-purple-200">
+                                        <div class="flex items-start justify-between gap-2 mb-1">
+                                            <a :href="'<?= url('incidencia_ver.php?id=') ?>' + s.id" target="_blank"
+                                               class="font-mono text-[10px] font-bold text-purple-700 hover:underline" x-text="s.folio"></a>
+                                            <span class="text-[10px] text-zinc-500" x-show="s.resuelto_por_nombre" x-text="s.resuelto_por_nombre"></span>
+                                        </div>
+                                        <div class="text-[11px] text-zinc-700 italic" x-text="s.solucion"></div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Técnicos expertos -->
+                        <div x-show="sugerencias.tecnicos.length > 0">
+                            <div class="text-[10px] font-bold text-emerald-700 uppercase tracking-wide mb-1.5">⭐ Técnicos con experiencia en este tipo</div>
+                            <div class="flex flex-wrap gap-2">
+                                <template x-for="t in sugerencias.tecnicos" :key="'t' + t.id">
+                                    <button type="button"
+                                            @click="$refs.selectAsignado.value = t.id; mensajeBalanceo = '✓ Asignado a ' + t.nombre_completo"
+                                            class="flex items-center gap-2 px-3 py-1.5 bg-white border border-emerald-200 rounded-lg hover:border-emerald-400 hover:shadow-sm transition-all">
+                                        <template x-if="t.avatar_full_url">
+                                            <img :src="t.avatar_full_url" :alt="t.nombre_completo" class="w-6 h-6 rounded-full object-cover">
+                                        </template>
+                                        <template x-if="!t.avatar_full_url">
+                                            <span class="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold flex items-center justify-center"
+                                                  x-text="t.nombre_completo.split(' ').slice(0,2).map(w => w[0]).join('').toUpperCase()"></span>
+                                        </template>
+                                        <div class="text-left">
+                                            <div class="text-xs font-semibold text-zinc-900" x-text="t.nombre_completo"></div>
+                                            <div class="text-[10px] text-zinc-500"><span x-text="t.resueltas"></span> casos resueltos</div>
+                                        </div>
+                                    </button>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="md:col-span-2">
                     <label class="block text-xs font-bold text-zinc-700 mb-1 uppercase tracking-wide">Descripción detallada *</label>
                     <textarea name="descripcion" required rows="4"
+                              x-model="descripcion"
+                              @input.debounce.500ms="cargarSugerencias(); sugerirCategoria()"
                               placeholder="Describe qué pasó, cuándo lo notaron, qué intentaron, qué impacto está teniendo, etc."
                               class="w-full px-3 py-2 rounded-lg border border-zinc-300 bg-white text-sm focus:outline-none focus:border-bacal-700 focus:ring-2 focus:ring-bacal-100"><?= e((string) $valores['descripcion']) ?></textarea>
                 </div>
@@ -379,6 +541,22 @@ require_once __DIR__ . '/config/header.php';
                         </option>
                         <?php endforeach; ?>
                     </select>
+
+                    <!-- Sugerencia de categoría según palabras clave -->
+                    <div x-show="sugerenciasCategoria.length > 0 && !categoriaId" x-cloak x-transition
+                         class="mt-2 flex flex-wrap gap-1.5 items-center">
+                        <span class="text-[10px] text-zinc-500 font-semibold">✨ Sugerido:</span>
+                        <template x-for="sc in sugerenciasCategoria" :key="'sc' + sc.categoria_id">
+                            <button type="button"
+                                    @click="categoriaId = String(sc.categoria_id); buscarReincidencias()"
+                                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border hover:shadow-sm transition-all"
+                                    :style="`color: ${sc.color}; background-color: ${sc.color}15; border-color: ${sc.color}40`"
+                                    :title="'Palabras coincidentes: ' + sc.palabras_coincidentes.join(', ')">
+                                <i data-lucide="sparkles" class="w-2.5 h-2.5"></i>
+                                <span x-text="sc.categoria_nombre"></span>
+                            </button>
+                        </template>
+                    </div>
                 </div>
 
                 <div>
@@ -463,16 +641,30 @@ require_once __DIR__ . '/config/header.php';
 
                 <?php if (tiene_permiso('administrar') || tiene_permiso('resolver')): ?>
                 <div class="md:col-span-2">
-                    <label class="block text-xs font-bold text-zinc-700 mb-1 uppercase tracking-wide">Asignar a técnico</label>
-                    <select name="asignado_a_id"
+                    <div class="flex items-center justify-between mb-1">
+                        <label class="block text-xs font-bold text-zinc-700 uppercase tracking-wide">Asignar a técnico</label>
+                        <button type="button" @click="asignarMenosCargado()"
+                                :disabled="cargandoBalanceo"
+                                class="text-[10px] font-semibold text-bacal-700 hover:text-bacal-800 flex items-center gap-1 disabled:opacity-50">
+                            <template x-if="!cargandoBalanceo">
+                                <span class="flex items-center gap-1"><i data-lucide="scale" class="w-3 h-3"></i> Asignar al menos cargado</span>
+                            </template>
+                            <template x-if="cargandoBalanceo">
+                                <span class="flex items-center gap-1"><i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Buscando...</span>
+                            </template>
+                        </button>
+                    </div>
+                    <select name="asignado_a_id" x-ref="selectAsignado"
                             class="w-full px-3 py-2 rounded-lg border border-zinc-300 bg-white text-sm focus:outline-none focus:border-bacal-700">
-                        <option value="">— Sin asignar (se asignará después) —</option>
+                        <option value="">— Sin asignar (se aplicará regla automática si existe) —</option>
                         <?php foreach ($tecnicos as $t): ?>
                         <option value="<?= $t['id'] ?>" <?= $valores['asignado_a_id'] == $t['id'] ? 'selected' : '' ?>>
                             <?= e($t['nombre_completo']) ?>
                         </option>
                         <?php endforeach; ?>
                     </select>
+                    <div x-show="mensajeBalanceo" x-cloak class="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 mt-1.5"
+                         x-text="mensajeBalanceo"></div>
                 </div>
                 <?php endif; ?>
             </div>
@@ -642,6 +834,23 @@ function formIncidencia() {
 
         categorias: <?= json_encode($categorias, JSON_UNESCAPED_UNICODE) ?>,
 
+        // === Fase 14: Sugerencias en vivo ===
+        titulo: '<?= e((string) $valores['titulo']) ?>',
+        descripcion: '<?= e((string) $valores['descripcion']) ?>',
+        tipoTrabajoId: '<?= e((string) $valores['tipo_trabajo_id']) ?>',
+        sugerencias: { plantillas: [], soluciones: [], tecnicos: [] },
+        timerSugerencias: null,
+        cargandoSugerencias: false,
+        mostrarSugerencias: true,
+
+        // === Fase 14: Balanceo de carga ===
+        cargandoBalanceo: false,
+        mensajeBalanceo: '',
+
+        // === Fase 15: Sugerencia de categoría ===
+        sugerenciasCategoria: [],
+        timerCategoria: null,
+
         get subcategoriasFiltradas() {
             if (!this.categoriaId) return [];
             const c = this.categorias.find(x => String(x.id) === String(this.categoriaId));
@@ -700,14 +909,169 @@ function formIncidencia() {
             this.archivosSeleccionados = Array.from(dt.files);
         },
 
+        // === Fase 14: Sugerencias en vivo con debounce 500ms ===
+        cargarSugerencias() {
+            clearTimeout(this.timerSugerencias);
+            const titulo = this.titulo.trim();
+            if (titulo.length < 3) {
+                this.sugerencias = { plantillas: [], soluciones: [], tecnicos: [] };
+                return;
+            }
+            this.timerSugerencias = setTimeout(async () => {
+                this.cargandoSugerencias = true;
+                try {
+                    const params = new URLSearchParams();
+                    params.append('titulo', titulo);
+                    if (this.categoriaId) params.append('categoria_id', this.categoriaId);
+                    if (this.tipoTrabajoId) params.append('tipo_trabajo_id', this.tipoTrabajoId);
+                    if (this.areaId) params.append('area_id', this.areaId);
+
+                    const resp = await fetch('<?= url('api/sugerencias_incidencia.php') ?>?' + params.toString(), {
+                        credentials: 'same-origin'
+                    });
+                    if (resp.ok) {
+                        this.sugerencias = await resp.json();
+                    }
+                } catch (e) {
+                    console.error('Error sugerencias:', e);
+                }
+                this.cargandoSugerencias = false;
+            }, 500);
+        },
+
+        // === Fase 14: Asignar al técnico con menos carga ===
+        async asignarMenosCargado() {
+            this.cargandoBalanceo = true;
+            this.mensajeBalanceo = '';
+            try {
+                const params = new URLSearchParams();
+                if (this.sucursalId) params.append('sucursal_id', this.sucursalId);
+                const resp = await fetch('<?= url('api/tecnico_menos_cargado.php') ?>?' + params.toString(), {
+                    credentials: 'same-origin'
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    this.$refs.selectAsignado.value = data.id;
+                    this.mensajeBalanceo = `✓ Asignado a ${data.nombre} (${data.abiertas} incidencia(s) abierta(s))`;
+                } else {
+                    this.mensajeBalanceo = '✗ ' + (data.error || 'No se pudo asignar');
+                }
+            } catch (e) {
+                this.mensajeBalanceo = '✗ Error: ' + e.message;
+            }
+            this.cargandoBalanceo = false;
+        },
+
+        // === Fase 15: Sugerir categoría según palabras clave ===
+        sugerirCategoria() {
+            clearTimeout(this.timerCategoria);
+            // Si ya hay categoría seleccionada, no sugerir (respetar elección del usuario)
+            if (this.categoriaId) {
+                this.sugerenciasCategoria = [];
+                return;
+            }
+            const texto = (this.titulo + ' ' + this.descripcion).trim();
+            if (texto.length < 3) {
+                this.sugerenciasCategoria = [];
+                return;
+            }
+            this.timerCategoria = setTimeout(async () => {
+                try {
+                    const params = new URLSearchParams();
+                    params.append('titulo', this.titulo);
+                    params.append('descripcion', this.descripcion);
+                    const resp = await fetch('<?= url('api/sugerir_categoria.php') ?>?' + params.toString(), {
+                        credentials: 'same-origin'
+                    });
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        this.sugerenciasCategoria = data.sugerencias || [];
+                    }
+                } catch (e) {
+                    console.error('Error sugerencias categoría:', e);
+                }
+            }, 500);
+        },
+
+        usarSugerenciaPlantilla(p) {
+            // Reutilizamos el método aplicarPlantilla
+            this.aplicarPlantilla(p);
+            this.mostrarSugerencias = false;
+        },
+
+        usarSugerenciaSolucion(s) {
+            const form = this.$refs.formulario;
+            // Si hay campo solucion, lo llenamos
+            if (form.solucion) form.solucion.value = s.solucion;
+            // Toggle del bloque "marcar resuelta"
+            window.dispatchEvent(new CustomEvent('abrir-bloque-solucion'));
+        },
+
         init() {
             // Cargar equipos al iniciar si ya hay sucursal
             if (this.sucursalId) this.cargarEquipos();
             // Buscar reincidencias si ya hay datos
             if (this.areaId) this.buscarReincidencias();
+
+            // Exponer aplicarPlantilla globalmente para el selector externo
+            window.__aplicarPlantilla = (p) => this.aplicarPlantilla(p);
+
+            // Cargar sugerencias iniciales si ya hay título (por error de validación)
+            if (this.titulo.length >= 3) {
+                this.cargarSugerencias();
+                this.sugerirCategoria();
+            }
+        },
+
+        aplicarPlantilla(p) {
+            // Pre-llenar campos del formulario
+            const form = this.$refs.formulario;
+            if (p.titulo) form.titulo.value = p.titulo;
+            if (p.descripcion_inc) form.descripcion.value = p.descripcion_inc;
+
+            if (p.area_id) {
+                this.areaId = String(p.area_id);
+                form.area_id.value = p.area_id;
+            }
+            if (p.categoria_id) {
+                this.categoriaId = String(p.categoria_id);
+                form.categoria_id.value = p.categoria_id;
+            }
+            if (p.subcategoria_id) {
+                this.subcategoriaId = String(p.subcategoria_id);
+            }
+            if (p.tipo_trabajo_id) form.tipo_trabajo_id.value = p.tipo_trabajo_id;
+            if (p.severidad_id) {
+                this.severidadId = String(p.severidad_id);
+                form.severidad_id.value = p.severidad_id;
+            }
+            if (p.origen_reporte_id) form.origen_reporte_id.value = p.origen_reporte_id;
+
+            // Si hay solución sugerida, mostrarla
+            if (p.solucion_sugerida && form.solucion) {
+                form.solucion.value = p.solucion_sugerida;
+            }
+
+            // Buscar reincidencias con los nuevos datos
+            this.buscarReincidencias();
+
+            // Mensaje visual
+            alert('Plantilla aplicada: "' + p.nombre + '". Revisa y completa los datos restantes.');
+
+            // Incrementar contador de uso (silenciosamente)
+            fetch('<?= url('api/plantilla_usada.php') ?>?id=' + p.id, { credentials: 'same-origin' }).catch(() => {});
         }
     }
 }
+
+// Conectar el botón de plantilla externa con el formulario interno
+document.addEventListener('alpine:init', () => {
+    Alpine.data('selectorPlantillas', () => ({
+        aplicarPlantilla(p) {
+            if (window.__aplicarPlantilla) window.__aplicarPlantilla(p);
+        }
+    }));
+});
 </script>
 
 <?php require_once __DIR__ . '/config/footer.php'; ?>

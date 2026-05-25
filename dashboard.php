@@ -14,7 +14,14 @@ $titulo_pagina = 'Dashboard';
 $pagina_activa = 'dashboard';
 require_once __DIR__ . '/config/header.php';
 
+require_once __DIR__ . '/config/mantenimientos_helpers.php';
+require_once __DIR__ . '/config/inteligencia_helpers.php';
+require_once __DIR__ . '/config/comunicacion_helpers.php';
+
 $u = usuario_actual();
+
+// Actualizar estados de mantenimientos
+actualizar_estados_mantenimientos();
 
 // ----------------------------------------------------------------------------
 // Determinar sucursal a mostrar (filtro)
@@ -216,6 +223,21 @@ if (tiene_permiso('resolver')) {
     );
 }
 
+// Mantenimientos próximos (14 días)
+$sucursal_para_mant = (tiene_permiso('ver_todas_sucursales') || tiene_permiso('administrar')) ? null : ($u['sucursal_id'] ?? null);
+$mantenimientos_widget = proximos_mantenimientos(14, $sucursal_para_mant);
+
+// Equipos problemáticos (con fallas recurrentes)
+$equipos_problema = equipos_problematicos($sucursal_para_mant, 8);
+
+// Anuncios visibles para este usuario (Fase 16)
+$anuncios_visibles = anuncios_visibles(
+    (int) $u['id'],
+    $u['sucursal_id'] ? (int) $u['sucursal_id'] : null,
+    (int) $u['rol_id'],
+    false // solo no leídos + fijados
+);
+
 // Alertas
 $alertas = [];
 
@@ -316,6 +338,59 @@ $mes_actual_es = $meses_es[(int) date('n') - 1] . ' ' . date('Y');
         <?php endif; ?>
     </div>
 
+    <!-- Widget: Tablero de anuncios (Fase 16) -->
+    <?php if (!empty($anuncios_visibles)): ?>
+    <div class="space-y-2">
+        <?php foreach ($anuncios_visibles as $an):
+            $cfg_an = ANUNCIO_TIPOS[$an['tipo']] ?? ANUNCIO_TIPOS['info'];
+        ?>
+        <div class="rounded-xl border-l-4 shadow-sm p-4 relative"
+             x-data="{ visible: true }"
+             x-show="visible"
+             x-transition
+             style="border-left-color: <?= e($cfg_an['color']) ?>; background-color: <?= e($cfg_an['color']) ?>08">
+            <div class="flex items-start gap-3">
+                <div class="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+                     style="background-color: <?= e($cfg_an['color']) ?>15">
+                    <i data-lucide="<?= e($cfg_an['icono']) ?>" class="w-4 h-4" style="color: <?= e($cfg_an['color']) ?>"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap mb-1">
+                        <h3 class="font-display font-bold text-zinc-900"><?= e($an['titulo']) ?></h3>
+                        <?php if ((int) $an['fijado'] === 1): ?>
+                        <span class="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">📌 FIJADO</span>
+                        <?php endif; ?>
+                    </div>
+                    <p class="text-sm text-zinc-700 whitespace-pre-wrap"><?= e($an['contenido']) ?></p>
+                    <div class="text-[10px] text-zinc-500 mt-2">
+                        Publicado <?= e(fmt_tiempo_relativo($an['creado_en'])) ?> por <?= e($an['creado_por_nombre'] ?? 'Admin') ?>
+                    </div>
+                </div>
+
+                <!-- Botón cerrar (no aparece si está fijado y ya lo leyó) -->
+                <button type="button"
+                        @click="cerrarAnuncio(<?= (int) $an['id'] ?>); visible = false"
+                        class="text-zinc-400 hover:text-zinc-700 p-1 flex-shrink-0"
+                        title="<?= (int) $an['fijado'] === 1 ? 'Marcar como leído' : 'Cerrar (no volver a mostrar)' ?>">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+        </div>
+        <?php endforeach; ?>
+
+        <script>
+        function cerrarAnuncio(id) {
+            fetch('<?= url('api/anuncio_cerrar.php') ?>', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: '_csrf=<?= e(csrf_token()) ?>&anuncio_id=' + id
+            }).catch(() => {});
+        }
+        </script>
+    </div>
+    <?php endif; ?>
+
     <!-- Alertas activas -->
     <?php if (!empty($alertas)): ?>
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-<?= min(count($alertas), 4) ?> gap-3">
@@ -340,24 +415,28 @@ $mes_actual_es = $meses_es[(int) date('n') - 1] . ' ' . date('Y');
     <?php endif; ?>
 
     <!-- KPIs principales -->
-    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <div class="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4"
+         x-data="sparklinesDashboard()" x-init="cargar()">
+        <div class="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden">
             <div class="w-9 h-9 rounded-lg bg-zinc-100 text-zinc-700 flex items-center justify-center mb-3">
                 <i data-lucide="inbox" class="w-4 h-4"></i>
             </div>
             <div class="font-display text-3xl font-extrabold text-zinc-900 leading-none"><?= $kpi_total_mes ?></div>
             <div class="text-[11px] text-zinc-500 mt-2 uppercase tracking-wider font-bold">Total del mes</div>
+            <!-- Sparkline -->
+            <div class="absolute right-3 bottom-3 w-20 h-8 opacity-60" x-html="sparkSvg('creadas', '#71717a')"></div>
         </div>
 
-        <div class="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+        <div class="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden">
             <div class="w-9 h-9 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center mb-3">
                 <i data-lucide="circle-dot" class="w-4 h-4"></i>
             </div>
             <div class="font-display text-3xl font-extrabold text-zinc-900 leading-none"><?= $kpi_abiertas ?></div>
             <div class="text-[11px] text-zinc-500 mt-2 uppercase tracking-wider font-bold">Abiertas</div>
+            <div class="absolute right-3 bottom-3 w-20 h-8 opacity-60" x-html="sparkSvg('abiertas', '#F59E0B')"></div>
         </div>
 
-        <div class="bg-white rounded-xl border <?= $kpi_criticas > 0 ? 'border-bacal-300 bg-gradient-to-br from-bacal-50 to-white' : 'border-zinc-200' ?> p-5 shadow-sm hover:shadow-md transition-shadow">
+        <div class="bg-white rounded-xl border <?= $kpi_criticas > 0 ? 'border-bacal-300 bg-gradient-to-br from-bacal-50 to-white' : 'border-zinc-200' ?> p-5 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden">
             <div class="w-9 h-9 rounded-lg bg-bacal-100 text-bacal-700 flex items-center justify-center mb-3">
                 <i data-lucide="zap" class="w-4 h-4"></i>
             </div>
@@ -365,7 +444,7 @@ $mes_actual_es = $meses_es[(int) date('n') - 1] . ' ' . date('Y');
             <div class="text-[11px] text-zinc-500 mt-2 uppercase tracking-wider font-bold">Críticas abiertas</div>
         </div>
 
-        <div class="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+        <div class="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden">
             <div class="w-9 h-9 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center mb-3">
                 <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
             </div>
@@ -373,7 +452,7 @@ $mes_actual_es = $meses_es[(int) date('n') - 1] . ' ' . date('Y');
             <div class="text-[11px] text-zinc-500 mt-2 uppercase tracking-wider font-bold">Reincidencias</div>
         </div>
 
-        <div class="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+        <div class="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden">
             <div class="w-9 h-9 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center mb-3">
                 <i data-lucide="timer" class="w-4 h-4"></i>
             </div>
@@ -381,6 +460,8 @@ $mes_actual_es = $meses_es[(int) date('n') - 1] . ' ' . date('Y');
                 <?= $kpi_tiempo_prom !== null ? e(fmt_duracion($kpi_tiempo_prom)) : '—' ?>
             </div>
             <div class="text-[11px] text-zinc-500 mt-2 uppercase tracking-wider font-bold">Resol. promedio</div>
+            <!-- Sparkline de resueltas -->
+            <div class="absolute right-3 bottom-3 w-20 h-8 opacity-60" x-html="sparkSvg('resueltas', '#16A34A')"></div>
         </div>
 
         <div class="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm hover:shadow-md transition-shadow">
@@ -438,6 +519,105 @@ $mes_actual_es = $meses_es[(int) date('n') - 1] . ' ' . date('Y');
             <?php endforeach; ?>
         </div>
         <?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <!-- Widget: Próximos mantenimientos -->
+    <?php if (!empty($mantenimientos_widget)): ?>
+    <div class="bg-white rounded-xl border border-zinc-200 shadow-sm p-6">
+        <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center">
+                    <i data-lucide="calendar-clock" class="w-4 h-4 text-amber-700"></i>
+                </div>
+                <div>
+                    <h3 class="font-display text-lg font-bold text-zinc-900">Próximos mantenimientos</h3>
+                    <p class="text-xs text-zinc-500">Próximos 14 días</p>
+                </div>
+                <span class="bg-amber-100 text-amber-800 text-xs font-semibold px-2 py-0.5 rounded-full"><?= count($mantenimientos_widget) ?></span>
+            </div>
+            <a href="<?= url('mantenimientos.php') ?>" class="text-xs font-semibold text-bacal-700 hover:text-bacal-800 flex items-center gap-1">
+                Ver todos <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i>
+            </a>
+        </div>
+
+        <div class="space-y-2">
+            <?php foreach (array_slice($mantenimientos_widget, 0, 6) as $mw):
+                $dias_m = (strtotime($mw['fecha_programada']) - strtotime(date('Y-m-d'))) / 86400;
+                $color_m = $dias_m < 0 ? '#DC2626' : ($dias_m <= 3 ? '#D97706' : '#0EA5E9');
+                $etiqueta_dias = $dias_m < 0 ? 'Vencido' : ($dias_m == 0 ? 'Hoy' : ($dias_m == 1 ? 'Mañana' : "En " . (int) $dias_m . " días"));
+            ?>
+            <a href="<?= url('mantenimiento_ver.php?id=' . $mw['id']) ?>" class="flex items-center gap-3 p-3 rounded-lg border border-zinc-200 hover:bg-zinc-50 transition-colors group">
+                <div class="w-11 h-11 rounded-lg flex flex-col items-center justify-center text-white flex-shrink-0" style="background-color: <?= $color_m ?>">
+                    <div class="text-[9px] font-bold uppercase opacity-90"><?= e(date('M', strtotime($mw['fecha_programada']))) ?></div>
+                    <div class="text-sm font-extrabold leading-none"><?= e(date('d', strtotime($mw['fecha_programada']))) ?></div>
+                </div>
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 mb-0.5 flex-wrap">
+                        <span class="font-mono text-[10px] font-bold text-zinc-500"><?= e($mw['equipo_codigo']) ?></span>
+                        <span class="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase" style="color: <?= $color_m ?>; background-color: <?= $color_m ?>15"><?= e($etiqueta_dias) ?></span>
+                    </div>
+                    <div class="font-semibold text-sm text-zinc-900 truncate group-hover:text-bacal-700"><?= e($mw['titulo']) ?></div>
+                    <div class="text-[11px] text-zinc-500 mt-0.5">
+                        <?= e($mw['sucursal_nombre']) ?>
+                        <?php if ($mw['asignado_nombre']): ?> · <?= e($mw['asignado_nombre']) ?><?php endif; ?>
+                        <?php if ($mw['proveedor_nombre']): ?> · <span class="text-bacal-700"><?= e($mw['proveedor_nombre']) ?></span><?php endif; ?>
+                    </div>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-zinc-300 group-hover:text-zinc-500 flex-shrink-0"></i>
+            </a>
+            <?php endforeach; ?>
+        </div>
+    </div>
+    <?php endif; ?>
+
+    <!-- Widget: Equipos problemáticos (predicción de fallas recurrentes) -->
+    <?php if (!empty($equipos_problema)): ?>
+    <div class="bg-white rounded-xl border border-zinc-200 shadow-sm p-6">
+        <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-lg bg-bacal-100 flex items-center justify-center">
+                    <i data-lucide="flame" class="w-4 h-4 text-bacal-700"></i>
+                </div>
+                <div>
+                    <h3 class="font-display text-lg font-bold text-zinc-900">Equipos con fallas recurrentes</h3>
+                    <p class="text-xs text-zinc-500">Considera mantenimiento preventivo o reemplazo</p>
+                </div>
+                <span class="bg-bacal-100 text-bacal-800 text-xs font-semibold px-2 py-0.5 rounded-full"><?= count($equipos_problema) ?></span>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <?php foreach ($equipos_problema as $eq):
+                $clas = clasificar_problema_equipo((int) $eq['inc_30d'], (int) $eq['inc_90d']);
+            ?>
+            <a href="<?= url('equipo_ver.php?id=' . $eq['id']) ?>"
+               class="flex items-center gap-3 p-3 rounded-lg border border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50 transition-colors group">
+                <div class="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
+                     style="background-color: <?= $clas['color'] ?>15">
+                    <i data-lucide="<?= $clas['icono'] ?>" class="w-5 h-5" style="color: <?= $clas['color'] ?>"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 mb-0.5 flex-wrap">
+                        <span class="font-mono text-[10px] font-bold text-zinc-500"><?= e($eq['codigo_inventario']) ?></span>
+                        <span class="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase"
+                              style="color: <?= $clas['color'] ?>; background-color: <?= $clas['color'] ?>15">
+                            <?= e($clas['etiqueta']) ?>
+                        </span>
+                    </div>
+                    <div class="font-semibold text-sm text-zinc-900 truncate group-hover:text-bacal-700"><?= e($eq['nombre']) ?></div>
+                    <div class="text-[11px] text-zinc-500 mt-0.5">
+                        <strong class="text-zinc-700"><?= (int) $eq['inc_30d'] ?></strong> en 30d ·
+                        <strong class="text-zinc-700"><?= (int) $eq['inc_90d'] ?></strong> en 90d
+                        <?php if ($eq['area_nombre']): ?>
+                        · <?= e($eq['area_nombre']) ?>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-zinc-300 group-hover:text-zinc-500 flex-shrink-0"></i>
+            </a>
+            <?php endforeach; ?>
+        </div>
     </div>
     <?php endif; ?>
 
@@ -725,6 +905,65 @@ $mes_actual_es = $meses_es[(int) date('n') - 1] . ' ' . date('Y');
             }
         });
     }
+</script>
+
+<script>
+function sparklinesDashboard() {
+    return {
+        series: { creadas: [], resueltas: [], abiertas: [] },
+        cargado: false,
+
+        async cargar() {
+            try {
+                const resp = await fetch('<?= url('api/sparklines_dashboard.php') ?>', {
+                    credentials: 'same-origin'
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    this.series = data.series;
+                    this.cargado = true;
+                }
+            } catch (e) {
+                console.error('Error sparklines:', e);
+            }
+        },
+
+        sparkSvg(serie, color) {
+            if (!this.cargado) return '';
+            const datos = this.series[serie] || [];
+            if (datos.length === 0 || datos.every(v => v === 0)) return '';
+
+            const ancho = 80, alto = 32;
+            const max = Math.max(...datos, 1);
+            const min = Math.min(...datos, 0);
+            const rango = Math.max(max - min, 1);
+            const pasoX = ancho / (datos.length - 1);
+
+            const puntos = datos.map((v, i) => {
+                const x = i * pasoX;
+                const y = alto - ((v - min) / rango) * (alto - 4) - 2;
+                return `${x},${y}`;
+            });
+
+            // Línea principal
+            const path = 'M ' + puntos.join(' L ');
+
+            // Área debajo de la línea
+            const areaPath = path + ` L ${ancho},${alto} L 0,${alto} Z`;
+
+            // Último punto destacado
+            const ultimo = puntos[puntos.length - 1].split(',');
+
+            return `
+                <svg viewBox="0 0 ${ancho} ${alto}" class="w-full h-full" preserveAspectRatio="none">
+                    <path d="${areaPath}" fill="${color}" fill-opacity="0.12" />
+                    <path d="${path}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                    <circle cx="${ultimo[0]}" cy="${ultimo[1]}" r="2" fill="${color}" />
+                </svg>
+            `;
+        },
+    }
+}
 </script>
 
 <?php require_once __DIR__ . '/config/footer.php'; ?>

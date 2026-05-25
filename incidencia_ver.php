@@ -16,6 +16,8 @@ require_once __DIR__ . '/config/db.php';
 require_once __DIR__ . '/config/auth.php';
 require_once __DIR__ . '/config/helpers.php';
 require_once __DIR__ . '/config/incidencias_helpers.php';
+require_once __DIR__ . '/config/notificaciones_helpers.php';
+require_once __DIR__ . '/config/comunicacion_helpers.php';
 
 requerir_login();
 
@@ -78,6 +80,18 @@ if (es_post()) {
                          VALUES (:iid, :uid, :c)",
                         ['iid' => $id, 'uid' => $u['id'], 'c' => $texto]
                     );
+                    notificar_comentario($id, (int) $u['id'], $texto);
+
+                    // Notificar menciones (@usuario) en el comentario
+                    notificar_menciones(
+                        $texto,
+                        (int) $u['id'],
+                        "Te mencionaron en {$incidencia['folio']}",
+                        url_relativa('incidencia_ver.php?id=' . $id) . '#comentarios',
+                        'incidencias',
+                        $id
+                    );
+
                     flash_set('success', 'Comentario agregado.');
                 }
                 break;
@@ -137,6 +151,7 @@ if (es_post()) {
                     (string) $incidencia['estado_id'], (string) $nuevo_estado,
                     "Estado cambiado a {$estado_info['nombre']}"
                 );
+                notificar_cambio_estado($id, $nuevo_estado, (int) $u['id']);
                 flash_set('success', "Estado actualizado a {$estado_info['nombre']}.");
                 break;
 
@@ -166,6 +181,9 @@ if (es_post()) {
                     (string) $incidencia['asignado_a_id'], (string) $tecnico_id,
                     "Asignado a $nombre_tec"
                 );
+                if ($tecnico_id) {
+                    notificar_asignacion($id, $tecnico_id, (int) $u['id']);
+                }
                 flash_set('success', "Incidencia asignada a $nombre_tec.");
                 break;
 
@@ -526,8 +544,9 @@ require_once __DIR__ . '/config/header.php';
                     <span class="bg-zinc-100 text-zinc-600 text-xs font-bold px-2 py-0.5 rounded-full"><?= count($comentarios) ?></span>
                 </h3>
 
-                <!-- Formulario nuevo comentario -->
-                <form method="POST" class="mb-5">
+                <!-- Formulario nuevo comentario con autocompletado @ -->
+                <form method="POST" class="mb-5"
+                      x-data="comentarioForm()">
                     <?= csrf_input() ?>
                     <input type="hidden" name="accion" value="comentar">
                     <div class="flex gap-2 items-start">
@@ -535,11 +554,42 @@ require_once __DIR__ . '/config/header.php';
                              style="background-color: <?= color_avatar($u['nombre']) ?>">
                             <?= e(iniciales($u['nombre'])) ?>
                         </div>
-                        <div class="flex-1">
+                        <div class="flex-1 relative">
                             <textarea name="comentario" rows="2" required
-                                      placeholder="Agrega un comentario, actualización o nota…"
+                                      x-ref="textarea"
+                                      x-model="texto"
+                                      @input="detectarMencion()"
+                                      @keydown="manejarTeclas($event)"
+                                      placeholder="Agrega un comentario… Usa @ para mencionar a un compañero"
                                       class="w-full px-3 py-2 rounded-lg border border-zinc-300 bg-white text-sm focus:outline-none focus:border-bacal-700"></textarea>
-                            <div class="flex justify-end mt-2">
+
+                            <!-- Dropdown de autocompletado -->
+                            <div x-show="sugerencias.length > 0" x-cloak
+                                 class="absolute z-50 mt-1 w-72 bg-white border border-zinc-200 rounded-lg shadow-lg max-h-64 overflow-y-auto">
+                                <template x-for="(usr, idx) in sugerencias" :key="usr.id">
+                                    <button type="button"
+                                            @click="seleccionarUsuario(usr)"
+                                            :class="idx === sugIndex ? 'bg-bacal-50' : 'hover:bg-zinc-50'"
+                                            class="w-full px-3 py-2 text-left flex items-center gap-2 border-b border-zinc-100 last:border-0">
+                                        <template x-if="usr.avatar_full_url">
+                                            <img :src="usr.avatar_full_url" class="w-7 h-7 rounded-full object-cover">
+                                        </template>
+                                        <template x-if="!usr.avatar_full_url">
+                                            <span class="w-7 h-7 rounded-full bg-zinc-300 text-white text-[10px] font-bold flex items-center justify-center"
+                                                  x-text="usr.iniciales"></span>
+                                        </template>
+                                        <div class="flex-1 min-w-0">
+                                            <div class="text-xs font-semibold text-zinc-900 truncate" x-text="usr.nombre_completo"></div>
+                                            <div class="text-[10px] text-zinc-500 font-mono">@<span x-text="usr.usuario"></span></div>
+                                        </div>
+                                    </button>
+                                </template>
+                            </div>
+
+                            <div class="flex items-center justify-between mt-2">
+                                <div class="text-[10px] text-zinc-400">
+                                    💡 Tip: escribe <code class="font-mono bg-zinc-100 px-1 rounded">@nombre</code> para mencionar a alguien
+                                </div>
                                 <button type="submit" class="px-3 py-1.5 rounded-lg bg-bacal-700 hover:bg-bacal-800 text-white text-sm font-semibold flex items-center gap-1.5">
                                     <i data-lucide="send" class="w-3.5 h-3.5"></i> Publicar
                                 </button>
@@ -553,18 +603,50 @@ require_once __DIR__ . '/config/header.php';
                 <?php else: ?>
                 <div class="space-y-4">
                     <?php foreach ($comentarios as $c): ?>
-                    <div class="flex gap-2.5 items-start">
-                        <div class="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
-                             style="background-color: <?= color_avatar($c['usuario_nombre']) ?>">
-                            <?= e(iniciales($c['usuario_nombre'])) ?>
-                        </div>
+                    <div class="flex gap-2.5 items-start group" data-comentario-id="<?= (int) $c['id'] ?>">
+                        <?= render_avatar([
+                            'nombre_completo' => $c['usuario_nombre'],
+                            'avatar_url' => $c['usuario_avatar'] ?? null,
+                        ], 'w-8 h-8') ?>
                         <div class="flex-1 min-w-0">
                             <div class="bg-zinc-50 rounded-lg p-3">
                                 <div class="flex items-center gap-2 mb-1">
                                     <span class="font-semibold text-sm text-zinc-900"><?= e($c['usuario_nombre']) ?></span>
                                     <span class="text-[11px] text-zinc-500"><?= e(fmt_tiempo_relativo($c['creado_en'])) ?></span>
                                 </div>
-                                <div class="text-sm text-zinc-700 whitespace-pre-wrap"><?= e($c['comentario']) ?></div>
+                                <div class="text-sm text-zinc-700 whitespace-pre-wrap"><?= renderizar_menciones($c['comentario']) ?></div>
+                            </div>
+
+                            <!-- Reacciones existentes + botón agregar -->
+                            <div class="flex items-center gap-1.5 mt-1.5 flex-wrap"
+                                 x-data="reaccionesComentario(<?= (int) $c['id'] ?>, <?= htmlspecialchars(json_encode($c['reacciones'] ?? []), ENT_QUOTES) ?>)">
+
+                                <!-- Reacciones existentes (con conteo) -->
+                                <template x-for="r in reacciones" :key="r.emoji">
+                                    <button type="button"
+                                            @click="toggleReaccion(r.emoji)"
+                                            :class="r.usuarios_ids.includes(<?= (int) $u['id'] ?>) ? 'bg-blue-100 border-blue-300 text-blue-800' : 'bg-zinc-100 border-zinc-200 text-zinc-700 hover:bg-zinc-200'"
+                                            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-xs transition-colors">
+                                        <span x-text="r.emoji"></span>
+                                        <span class="font-semibold" x-text="r.total"></span>
+                                    </button>
+                                </template>
+
+                                <!-- Botón para agregar reacción -->
+                                <div class="relative opacity-0 group-hover:opacity-100 transition-opacity" x-data="{ abierto: false }" @click.outside="abierto = false">
+                                    <button type="button" @click="abierto = !abierto"
+                                            class="inline-flex items-center px-1.5 py-0.5 rounded-full border border-dashed border-zinc-300 text-zinc-400 hover:border-zinc-500 hover:text-zinc-700 text-xs">
+                                        <i data-lucide="smile-plus" class="w-3 h-3"></i>
+                                    </button>
+                                    <div x-show="abierto" x-cloak x-transition
+                                         class="absolute z-40 bottom-full mb-1 left-0 bg-white border border-zinc-200 rounded-lg shadow-lg p-1 flex gap-0.5">
+                                        <?php foreach (EMOJIS_REACCION as $emoji): ?>
+                                        <button type="button"
+                                                @click="toggleReaccion('<?= e($emoji) ?>'); abierto = false"
+                                                class="hover:bg-zinc-100 rounded p-1 text-base"><?= $emoji ?></button>
+                                        <?php endforeach; ?>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -573,6 +655,142 @@ require_once __DIR__ . '/config/header.php';
                 <?php endif; ?>
             </div>
         </div>
+
+        <script>
+        // === Form de comentario con autocompletado de menciones ===
+        function comentarioForm() {
+            return {
+                texto: '',
+                sugerencias: [],
+                sugIndex: 0,
+                timerBuscar: null,
+                inicioMencion: -1, // posición del @ en el textarea
+
+                detectarMencion() {
+                    const ta = this.$refs.textarea;
+                    const pos = ta.selectionStart;
+                    const texto = this.texto.substring(0, pos);
+
+                    // Buscar @ más reciente que no tenga espacio antes
+                    const match = texto.match(/(?:^|\s)@([a-zA-Z0-9._-]*)$/);
+                    if (match) {
+                        const query = match[1];
+                        this.inicioMencion = pos - match[0].length + match[0].indexOf('@');
+                        this.buscarUsuarios(query);
+                    } else {
+                        this.sugerencias = [];
+                        this.inicioMencion = -1;
+                    }
+                },
+
+                async buscarUsuarios(q) {
+                    clearTimeout(this.timerBuscar);
+                    this.timerBuscar = setTimeout(async () => {
+                        try {
+                            const resp = await fetch('<?= url('api/usuarios_buscar.php') ?>?q=' + encodeURIComponent(q), {
+                                credentials: 'same-origin'
+                            });
+                            if (resp.ok) {
+                                const data = await resp.json();
+                                this.sugerencias = data.usuarios || [];
+                                this.sugIndex = 0;
+                            }
+                        } catch (e) {}
+                    }, 150);
+                },
+
+                seleccionarUsuario(usr) {
+                    const ta = this.$refs.textarea;
+                    const posActual = ta.selectionStart;
+                    const antes = this.texto.substring(0, this.inicioMencion);
+                    const despues = this.texto.substring(posActual);
+                    const reemplazo = '@' + usr.usuario + ' ';
+                    this.texto = antes + reemplazo + despues;
+                    this.sugerencias = [];
+
+                    // Reposicionar cursor
+                    this.$nextTick(() => {
+                        const nuevaPos = this.inicioMencion + reemplazo.length;
+                        ta.setSelectionRange(nuevaPos, nuevaPos);
+                        ta.focus();
+                    });
+                },
+
+                manejarTeclas(e) {
+                    if (this.sugerencias.length === 0) return;
+
+                    if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        this.sugIndex = (this.sugIndex + 1) % this.sugerencias.length;
+                    } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        this.sugIndex = (this.sugIndex - 1 + this.sugerencias.length) % this.sugerencias.length;
+                    } else if (e.key === 'Enter' || e.key === 'Tab') {
+                        if (this.sugerencias[this.sugIndex]) {
+                            e.preventDefault();
+                            this.seleccionarUsuario(this.sugerencias[this.sugIndex]);
+                        }
+                    } else if (e.key === 'Escape') {
+                        this.sugerencias = [];
+                    }
+                }
+            }
+        }
+
+        // === Reacciones a comentarios ===
+        function reaccionesComentario(comentarioId, reaccionesIniciales) {
+            return {
+                comentarioId: comentarioId,
+                reacciones: reaccionesIniciales,
+
+                async toggleReaccion(emoji) {
+                    try {
+                        const fd = new FormData();
+                        fd.append('_csrf', '<?= e(csrf_token()) ?>');
+                        fd.append('comentario_id', this.comentarioId);
+                        fd.append('emoji', emoji);
+
+                        const resp = await fetch('<?= url('api/comentario_reaccionar.php') ?>', {
+                            method: 'POST', body: fd, credentials: 'same-origin'
+                        });
+                        const data = await resp.json();
+
+                        if (!data.ok) return;
+
+                        // Actualizar estado local sin recargar
+                        const userId = <?= (int) $u['id'] ?>;
+                        const idx = this.reacciones.findIndex(r => r.emoji === emoji);
+
+                        if (data.estado === 'agregada') {
+                            if (idx >= 0) {
+                                if (!this.reacciones[idx].usuarios_ids.includes(userId)) {
+                                    this.reacciones[idx].usuarios_ids.push(userId);
+                                }
+                                this.reacciones[idx].total = data.nuevo_total;
+                            } else {
+                                this.reacciones.push({
+                                    emoji: emoji,
+                                    total: data.nuevo_total,
+                                    usuarios_ids: [userId],
+                                });
+                            }
+                        } else {
+                            // eliminada
+                            if (idx >= 0) {
+                                this.reacciones[idx].usuarios_ids = this.reacciones[idx].usuarios_ids.filter(u => u !== userId);
+                                this.reacciones[idx].total = data.nuevo_total;
+                                if (data.nuevo_total === 0) {
+                                    this.reacciones.splice(idx, 1);
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error reaccionar:', e);
+                    }
+                }
+            }
+        }
+        </script>
 
         <!-- ============================================== -->
         <!-- SIDEBAR DERECHO -->

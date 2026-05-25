@@ -145,6 +145,39 @@ if (es_post()) {
                 }
                 header('Location: ' . url('admin/usuarios.php'));
                 exit;
+            } elseif ($op === 'cerrar_sesion' && $usuario_edit) {
+                // Cierre de UNA sesión específica del usuario
+                $sesion_id_target = (int) input('sesion_id', 0);
+                if ($sesion_id_target > 0) {
+                    forzar_cierre_sesion($sesion_id_target, "Cerrada por {$u_actual['nombre']}");
+                    registrar_auditoria('cerrar_sesion_remota', 'sesiones', $sesion_id_target,
+                        "Admin cerró sesión #$sesion_id_target del usuario {$usuario_edit['usuario']}");
+                    flash_set('success', 'Sesión cerrada remotamente.');
+                }
+                header('Location: ' . url('admin/usuarios.php?accion=editar&id=' . $usuario_edit['id']) . '#sesiones');
+                exit;
+            } elseif ($op === 'cerrar_todas_sesiones' && $usuario_edit) {
+                $total = cerrar_todas_sesiones_usuario((int) $usuario_edit['id'], "Cerradas por {$u_actual['nombre']}");
+                registrar_auditoria('cerrar_todas_sesiones', 'usuarios', (int) $usuario_edit['id'],
+                    "Admin cerró todas las sesiones ($total) del usuario {$usuario_edit['usuario']}");
+                flash_set('success', "Se cerraron $total sesión(es) activa(s).");
+                header('Location: ' . url('admin/usuarios.php?accion=editar&id=' . $usuario_edit['id']) . '#sesiones');
+                exit;
+            } elseif ($op === 'eliminar_avatar' && $usuario_edit) {
+                // Eliminar avatar del usuario seleccionado
+                if (!empty($usuario_edit['avatar_url'])) {
+                    $ruta = __DIR__ . '/../' . $usuario_edit['avatar_url'];
+                    if (file_exists($ruta) && strpos($usuario_edit['avatar_url'], 'assets/avatares/') === 0) {
+                        @unlink($ruta);
+                    }
+                }
+                db_exec("UPDATE usuarios SET avatar_url = NULL WHERE id = :id",
+                    ['id' => $usuario_edit['id']]);
+                registrar_auditoria('eliminar_avatar', 'usuarios', (int) $usuario_edit['id'],
+                    "Admin eliminó avatar del usuario {$usuario_edit['usuario']}");
+                flash_set('success', 'Avatar eliminado.');
+                header('Location: ' . url('admin/usuarios.php?accion=editar&id=' . $usuario_edit['id']));
+                exit;
             }
         } catch (Throwable $e) {
             $errores[] = 'Error: ' . $e->getMessage();
@@ -158,6 +191,17 @@ if (es_post()) {
 $roles      = db_all("SELECT id, nombre, descripcion FROM roles WHERE activo=1 ORDER BY id");
 $sucursales = db_all("SELECT id, nombre FROM sucursales WHERE activo=1 ORDER BY nombre");
 $areas      = db_all("SELECT id, nombre FROM areas WHERE activo=1 ORDER BY nombre");
+
+// Sesiones activas del usuario (solo cuando se está editando)
+$sesiones_activas = [];
+$historial_sesiones = [];
+if ($accion === 'editar' && $usuario_edit) {
+    $sesiones_activas   = listar_sesiones_activas((int) $usuario_edit['id']);
+    $historial_sesiones = listar_historial_sesiones((int) $usuario_edit['id'], 15);
+}
+
+// Variable visible en la vista
+$MAX_AVATAR_BYTES = 5 * 1024 * 1024;
 
 $titulo_pagina = 'Usuarios';
 $pagina_activa = 'admin_usuarios';
@@ -294,6 +338,194 @@ if ($accion === 'nuevo' || ($accion === 'editar' && $usuario_edit)):
             </button>
         </div>
     </form>
+
+    <?php if ($es_edicion): ?>
+    <!-- ====================================================================
+         SECCIÓN ADICIONAL DE ADMIN: AVATAR + SESIONES (solo en edición)
+         ==================================================================== -->
+
+    <!-- Avatar del usuario (admin puede cambiarlo o eliminarlo) -->
+    <div class="bg-white rounded-xl border border-zinc-200 shadow-sm p-6 mt-5" x-data="avatarAdmin()">
+        <h3 class="font-display text-base font-bold text-zinc-900 mb-1 flex items-center gap-2">
+            <i data-lucide="image" class="w-4 h-4 text-bacal-700"></i> Foto de perfil del usuario
+        </h3>
+        <p class="text-xs text-zinc-500 mb-4">Puedes subir o quitar la foto de este usuario.</p>
+
+        <div class="flex items-start gap-5">
+            <div class="flex-shrink-0">
+                <?= render_avatar($u, 'w-24 h-24', 'border-4 border-zinc-100') ?>
+            </div>
+
+            <div class="flex-1 space-y-2">
+                <input type="file" x-ref="inputFoto" accept="image/jpeg,image/png,image/webp"
+                       @change="subir($event.target.files[0])" class="hidden">
+
+                <button type="button" @click="$refs.inputFoto.click()"
+                        :disabled="subiendo"
+                        class="px-4 py-2 rounded-lg bg-bacal-700 hover:bg-bacal-800 text-white text-sm font-semibold flex items-center gap-2 disabled:opacity-50">
+                    <template x-if="!subiendo">
+                        <span class="flex items-center gap-2"><i data-lucide="upload" class="w-4 h-4"></i> Subir foto</span>
+                    </template>
+                    <template x-if="subiendo">
+                        <span class="flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Subiendo…</span>
+                    </template>
+                </button>
+
+                <?php if (!empty($u['avatar_url'])): ?>
+                <form method="POST" onsubmit="return confirm('¿Eliminar la foto de perfil de este usuario?');" class="inline-block">
+                    <?= csrf_input() ?>
+                    <input type="hidden" name="op" value="eliminar_avatar">
+                    <button type="submit" class="px-4 py-2 rounded-lg border border-zinc-300 text-zinc-700 text-sm font-medium hover:bg-zinc-50 inline-flex items-center gap-2">
+                        <i data-lucide="trash-2" class="w-4 h-4"></i> Quitar foto
+                    </button>
+                </form>
+                <?php endif; ?>
+
+                <p class="text-[11px] text-zinc-500">Máximo 5 MB · JPG, PNG o WebP · se recortará automáticamente a cuadrado.</p>
+
+                <div x-show="error" x-cloak class="text-xs text-bacal-700 bg-bacal-50 border border-bacal-200 rounded-lg px-3 py-2 mt-2"
+                     x-text="error"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sesiones activas -->
+    <div id="sesiones" class="bg-white rounded-xl border border-zinc-200 shadow-sm p-6 mt-5">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="font-display text-base font-bold text-zinc-900 flex items-center gap-2">
+                <i data-lucide="laptop" class="w-4 h-4 text-bacal-700"></i> Sesiones activas
+                <span class="text-xs font-normal text-zinc-500">(<?= count($sesiones_activas) ?>)</span>
+            </h3>
+            <?php if (count($sesiones_activas) > 0): ?>
+            <form method="POST" onsubmit="return confirm('¿Cerrar TODAS las sesiones activas de este usuario? Tendrá que volver a iniciar sesión en cualquier dispositivo donde esté.');" class="inline-block">
+                <?= csrf_input() ?>
+                <input type="hidden" name="op" value="cerrar_todas_sesiones">
+                <button type="submit" class="px-3 py-1.5 rounded-lg border border-bacal-300 text-bacal-700 text-xs font-semibold hover:bg-bacal-50 flex items-center gap-1.5">
+                    <i data-lucide="log-out" class="w-3.5 h-3.5"></i> Cerrar todas
+                </button>
+            </form>
+            <?php endif; ?>
+        </div>
+
+        <?php if (empty($sesiones_activas)): ?>
+        <p class="text-xs text-zinc-400 italic text-center py-6">No hay sesiones activas para este usuario.</p>
+        <?php else: ?>
+        <div class="space-y-2">
+            <?php foreach ($sesiones_activas as $sesion): ?>
+            <div class="flex items-center gap-3 p-3 rounded-lg border border-zinc-200 bg-zinc-50">
+                <div class="w-10 h-10 rounded-lg bg-white border border-zinc-200 flex items-center justify-center flex-shrink-0">
+                    <i data-lucide="<?= e(icono_dispositivo($sesion['dispositivo'] ?? '')) ?>" class="w-5 h-5 text-zinc-600"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                    <div class="font-semibold text-sm text-zinc-900">
+                        <?= e($sesion['dispositivo'] ?: 'Desconocido') ?>
+                        <?php if ($sesion['navegador']): ?>
+                        <span class="text-zinc-500 font-normal">· <?= e($sesion['navegador']) ?></span>
+                        <?php endif; ?>
+                    </div>
+                    <div class="text-[11px] text-zinc-500 mt-0.5 flex flex-wrap gap-x-3">
+                        <span><i data-lucide="map-pin" class="w-3 h-3 inline -mt-0.5"></i> IP: <?= e($sesion['ip'] ?? '—') ?></span>
+                        <span><i data-lucide="log-in" class="w-3 h-3 inline -mt-0.5"></i> Login: <?= e(fmt_tiempo_relativo($sesion['creado_en'])) ?></span>
+                        <span><i data-lucide="activity" class="w-3 h-3 inline -mt-0.5"></i> Última actividad: <?= e(fmt_tiempo_relativo($sesion['ultima_actividad'])) ?></span>
+                    </div>
+                </div>
+                <form method="POST" onsubmit="return confirm('¿Cerrar esta sesión específica?');">
+                    <?= csrf_input() ?>
+                    <input type="hidden" name="op" value="cerrar_sesion">
+                    <input type="hidden" name="sesion_id" value="<?= (int) $sesion['id'] ?>">
+                    <button type="submit" class="p-2 rounded text-zinc-400 hover:text-bacal-700 hover:bg-white"
+                            title="Cerrar esta sesión">
+                        <i data-lucide="x-circle" class="w-4 h-4"></i>
+                    </button>
+                </form>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+
+        <!-- Historial -->
+        <?php if (!empty($historial_sesiones)): ?>
+        <details class="mt-5 pt-5 border-t border-zinc-100">
+            <summary class="cursor-pointer text-xs font-semibold text-zinc-600 hover:text-zinc-900 flex items-center gap-1.5">
+                <i data-lucide="history" class="w-3.5 h-3.5"></i> Ver historial de sesiones (<?= count($historial_sesiones) ?>)
+            </summary>
+            <div class="mt-3 overflow-x-auto">
+                <table class="w-full text-xs">
+                    <thead class="border-b border-zinc-200">
+                        <tr>
+                            <th class="px-2 py-2 text-left text-[10px] font-bold text-zinc-500 uppercase">Dispositivo</th>
+                            <th class="px-2 py-2 text-left text-[10px] font-bold text-zinc-500 uppercase">IP</th>
+                            <th class="px-2 py-2 text-left text-[10px] font-bold text-zinc-500 uppercase">Inicio</th>
+                            <th class="px-2 py-2 text-left text-[10px] font-bold text-zinc-500 uppercase">Cierre</th>
+                            <th class="px-2 py-2 text-left text-[10px] font-bold text-zinc-500 uppercase">Estado</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-zinc-100">
+                        <?php foreach ($historial_sesiones as $h): ?>
+                        <tr>
+                            <td class="px-2 py-2"><?= e($h['dispositivo'] ?: '—') ?> <?php if ($h['navegador']): ?><span class="text-zinc-400">· <?= e($h['navegador']) ?></span><?php endif; ?></td>
+                            <td class="px-2 py-2 font-mono text-zinc-600"><?= e($h['ip'] ?? '—') ?></td>
+                            <td class="px-2 py-2 text-zinc-600"><?= e(fmt_fecha($h['creado_en'])) ?></td>
+                            <td class="px-2 py-2 text-zinc-600">
+                                <?= $h['cerrada_en'] ? e(fmt_fecha($h['cerrada_en'])) : '<span class="text-zinc-400">—</span>' ?>
+                            </td>
+                            <td class="px-2 py-2">
+                                <?php if ((int) $h['activa'] === 1): ?>
+                                <span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">ACTIVA</span>
+                                <?php else: ?>
+                                <span class="text-[10px] font-medium text-zinc-500 bg-zinc-100 px-1.5 py-0.5 rounded" title="<?= e((string) $h['motivo_cierre']) ?>">CERRADA</span>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </details>
+        <?php endif; ?>
+    </div>
+
+    <script>
+    function avatarAdmin() {
+        return {
+            subiendo: false,
+            error: '',
+            async subir(archivo) {
+                if (!archivo) return;
+                this.error = '';
+                const tiposOk = ['image/jpeg','image/png','image/webp'];
+                if (!tiposOk.includes(archivo.type)) {
+                    this.error = 'Solo JPG, PNG o WebP.';
+                    return;
+                }
+                if (archivo.size > <?= $MAX_AVATAR_BYTES ?>) {
+                    this.error = 'La imagen excede los 5 MB.';
+                    return;
+                }
+                this.subiendo = true;
+                const fd = new FormData();
+                fd.append('_csrf', '<?= e(csrf_token()) ?>');
+                fd.append('avatar', archivo);
+                fd.append('usuario_id', '<?= (int) $u['id'] ?>');
+                try {
+                    const resp = await fetch('<?= url('api/avatar_subir.php') ?>', {
+                        method: 'POST', body: fd, credentials: 'same-origin'
+                    });
+                    const data = await resp.json();
+                    if (data.ok) {
+                        window.location.reload();
+                    } else {
+                        this.error = data.error || 'Error al subir.';
+                    }
+                } catch (e) {
+                    this.error = 'Error de red: ' + e.message;
+                }
+                this.subiendo = false;
+            }
+        }
+    }
+    </script>
+    <?php endif; ?>
 </div>
 
 <?php
@@ -403,10 +635,7 @@ else:
                 <tr class="hover:bg-zinc-50 group <?= !$usr['activo'] ? 'opacity-50' : '' ?>">
                     <td class="px-4 py-3">
                         <div class="flex items-center gap-2.5">
-                            <div class="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-sm flex-shrink-0"
-                                 style="background-color: <?= color_avatar($usr['nombre_completo']) ?>">
-                                <?= e(iniciales($usr['nombre_completo'])) ?>
-                            </div>
+                            <?= render_avatar($usr, 'w-8 h-8') ?>
                             <div class="min-w-0">
                                 <div class="font-semibold text-sm text-zinc-900 truncate"><?= e($usr['nombre_completo']) ?></div>
                                 <div class="text-[11px] text-zinc-500 font-mono"><?= e($usr['usuario']) ?></div>

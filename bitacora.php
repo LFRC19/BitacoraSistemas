@@ -52,6 +52,7 @@ $f_sin_asignar  = (int) input('sin_asignar', 0);
 $f_sla_riesgo   = (int) input('sla_riesgo', 0);
 $f_sla_vencido  = (int) input('sla_vencido', 0);
 $f_sin_actualizar = (int) input('sin_actualizar', 0);
+$f_archivadas   = (int) input('archivadas', 0);          // 0=ocultar archivadas, 1=incluir, 2=solo archivadas
 
 $orden_campo    = (string) input('orden', 'creado_en');
 $orden_dir      = strtolower((string) input('dir', 'desc')) === 'asc' ? 'asc' : 'desc';
@@ -107,6 +108,11 @@ if ($f_sin_asignar)      { $where[] = "i.asignado_a_id IS NULL"; }
 if ($f_sla_riesgo)       { $where[] = "i.fecha_limite_sla BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 2 HOUR) AND est.es_final = 0"; }
 if ($f_sla_vencido)      { $where[] = "i.fecha_limite_sla < NOW() AND est.es_final = 0"; }
 if ($f_sin_actualizar)   { $where[] = "i.actualizado_en < DATE_SUB(NOW(), INTERVAL 7 DAY) AND est.es_final = 0"; }
+
+// Filtro de archivadas (Fase 15): por default solo NO archivadas
+if ($f_archivadas === 2)      { $where[] = "i.archivada = 1"; }
+elseif ($f_archivadas === 1)  { /* incluir todas */ }
+else                          { $where[] = "i.archivada = 0"; }
 
 $where_sql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
 
@@ -258,7 +264,7 @@ $hay_filtros = !empty($f_busqueda) || $f_sucursal || $f_area || $f_categoria
     || $f_tipo_trabajo || $f_severidad || $f_estado || $f_asignado_a
     || $f_equipo || $f_fecha_desde || $f_fecha_hasta || $f_reincidencia
     || $f_abiertas || $f_sin_asignar || $f_sla_riesgo || $f_sla_vencido
-    || $f_sin_actualizar;
+    || $f_sin_actualizar || $f_archivadas;
 ?>
 
 <div class="space-y-4 animate-fade-in"
@@ -459,6 +465,15 @@ $hay_filtros = !empty($f_busqueda) || $f_sucursal || $f_area || $f_categoria
             <i data-lucide="clock" class="w-3 h-3"></i> Sin actualizar 7+ días <i data-lucide="x" class="w-3 h-3"></i>
         </a>
         <?php endif; ?>
+        <?php if ($f_archivadas === 1): ?>
+        <a href="<?= url_filtros(['archivadas' => '']) ?>" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-200 hover:bg-zinc-300 text-zinc-700 font-medium">
+            <i data-lucide="archive" class="w-3 h-3"></i> Incluye archivadas <i data-lucide="x" class="w-3 h-3"></i>
+        </a>
+        <?php elseif ($f_archivadas === 2): ?>
+        <a href="<?= url_filtros(['archivadas' => '']) ?>" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-800 font-medium">
+            <i data-lucide="archive" class="w-3 h-3"></i> Solo archivadas <i data-lucide="x" class="w-3 h-3"></i>
+        </a>
+        <?php endif; ?>
 
         <a href="<?= url('bitacora.php') ?>" class="text-bacal-700 hover:text-bacal-800 font-semibold ml-1">Limpiar todo</a>
     </div>
@@ -558,6 +573,15 @@ $hay_filtros = !empty($f_busqueda) || $f_sucursal || $f_area || $f_categoria
                 <label class="block text-[11px] font-bold text-zinc-600 mb-1 uppercase tracking-wide">Fecha hasta</label>
                 <input type="date" name="fecha_hasta" value="<?= e($f_fecha_hasta) ?>"
                        class="w-full px-3 py-2 rounded-lg border border-zinc-300 bg-white text-sm focus:outline-none focus:border-bacal-700">
+            </div>
+
+            <div>
+                <label class="block text-[11px] font-bold text-zinc-600 mb-1 uppercase tracking-wide">Archivadas (>1 año)</label>
+                <select name="archivadas" class="w-full px-3 py-2 rounded-lg border border-zinc-300 bg-white text-sm focus:outline-none focus:border-bacal-700">
+                    <option value="0" <?= $f_archivadas === 0 ? 'selected' : '' ?>>Ocultar archivadas</option>
+                    <option value="1" <?= $f_archivadas === 1 ? 'selected' : '' ?>>Incluir archivadas</option>
+                    <option value="2" <?= $f_archivadas === 2 ? 'selected' : '' ?>>Solo archivadas</option>
+                </select>
             </div>
 
             <div class="md:col-span-2 lg:col-span-4 flex flex-wrap gap-4 items-center pt-2 border-t border-zinc-100">

@@ -20,6 +20,19 @@ function url(string $ruta = ''): string {
 }
 
 /**
+ * Devuelve una URL RELATIVA (sin protocolo+host).
+ * Útil para guardar en BD donde la URL debe funcionar para todos los clientes,
+ * sin importar desde dónde acceden (localhost, IP local, dominio público).
+ *
+ * Ejemplo: url_relativa('incidencia_ver.php?id=5')
+ *  → '/UtilidadesBacal/BitacoraSistemas/incidencia_ver.php?id=5'
+ */
+function url_relativa(string $ruta = ''): string {
+    $base = parse_url(APP_URL, PHP_URL_PATH) ?: '';
+    return rtrim($base, '/') . '/' . ltrim($ruta, '/');
+}
+
+/**
  * Devuelve un valor de $_POST o $_GET con valor por defecto.
  */
 function input(string $clave, $default = null) {
@@ -198,4 +211,45 @@ function color_avatar(?string $texto): string {
     $hash = crc32($texto);
     $indice = $hash % count($colores);
     return $colores[$indice];
+}
+
+/**
+ * Renderiza un avatar: si el usuario tiene foto la muestra, si no, iniciales con color.
+ *
+ * @param array|null $usuario  Array con nombre_completo y avatar_url (opcional)
+ * @param string $tamano       Clases Tailwind para el tamaño (ej. 'w-8 h-8', 'w-10 h-10', 'w-16 h-16')
+ * @param string $clases_extra Clases extra para el contenedor
+ * @return string HTML del avatar
+ */
+function render_avatar(?array $usuario, string $tamano = 'w-8 h-8', string $clases_extra = ''): string {
+    if (!$usuario) {
+        return '<div class="' . $tamano . ' rounded-full bg-zinc-200 ' . $clases_extra . '"></div>';
+    }
+
+    $nombre = (string) ($usuario['nombre_completo'] ?? $usuario['nombre'] ?? '');
+    $avatar = (string) ($usuario['avatar_url'] ?? '');
+
+    // Determinar tamaño de fuente según el tamaño del avatar
+    $clase_texto = 'text-xs';
+    if (strpos($tamano, 'w-16') !== false || strpos($tamano, 'w-20') !== false) $clase_texto = 'text-sm';
+    if (strpos($tamano, 'w-24') !== false || strpos($tamano, 'w-32') !== false) $clase_texto = 'text-base';
+    if (strpos($tamano, 'w-12') !== false || strpos($tamano, 'w-14') !== false) $clase_texto = 'text-xs';
+
+    if ($avatar !== '') {
+        // Mostrar la foto
+        $src = url($avatar);
+        $alt_e = htmlspecialchars($nombre, ENT_QUOTES, 'UTF-8');
+        return sprintf(
+            '<div class="%s rounded-full overflow-hidden flex-shrink-0 %s"><img src="%s" alt="%s" class="w-full h-full object-cover"></div>',
+            $tamano, $clases_extra, htmlspecialchars($src, ENT_QUOTES, 'UTF-8'), $alt_e
+        );
+    }
+
+    // Sin foto: iniciales con color
+    $iniciales_e = htmlspecialchars(iniciales($nombre), ENT_QUOTES, 'UTF-8');
+    $color = color_avatar($nombre);
+    return sprintf(
+        '<div class="%s rounded-full flex items-center justify-center text-white %s font-bold shadow-sm flex-shrink-0 %s" style="background-color: %s">%s</div>',
+        $tamano, $clase_texto, $clases_extra, htmlspecialchars($color, ENT_QUOTES, 'UTF-8'), $iniciales_e
+    );
 }

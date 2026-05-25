@@ -425,14 +425,48 @@ function cargar_adjuntos(int $incidencia_id): array {
 }
 
 function cargar_comentarios(int $incidencia_id): array {
-    return db_all(
-        "SELECT c.*, u.nombre_completo usuario_nombre
+    $comentarios = db_all(
+        "SELECT c.*, u.nombre_completo usuario_nombre, u.avatar_url usuario_avatar
          FROM incidencias_comentarios c
          INNER JOIN usuarios u ON c.usuario_id = u.id
          WHERE c.incidencia_id = :iid
          ORDER BY c.creado_en ASC",
         ['iid' => $incidencia_id]
     );
+
+    if (empty($comentarios)) return [];
+
+    // Cargar reacciones de todos los comentarios en una sola query
+    $ids = array_column($comentarios, 'id');
+    $placeholders = implode(',', array_map(fn($i) => (int) $i, $ids));
+
+    $reacciones = db_all(
+        "SELECT comentario_id, emoji, COUNT(*) AS total,
+                GROUP_CONCAT(usuario_id) AS usuarios_ids
+         FROM comentario_reacciones
+         WHERE comentario_id IN ($placeholders)
+         GROUP BY comentario_id, emoji"
+    );
+
+    // Indexar reacciones por comentario_id
+    $reacciones_por_com = [];
+    foreach ($reacciones as $r) {
+        $cid = (int) $r['comentario_id'];
+        if (!isset($reacciones_por_com[$cid])) $reacciones_por_com[$cid] = [];
+        $reacciones_por_com[$cid][] = [
+            'emoji' => $r['emoji'],
+            'total' => (int) $r['total'],
+            'usuarios_ids' => array_map('intval', explode(',', $r['usuarios_ids'])),
+        ];
+    }
+
+    // Adjuntar reacciones a cada comentario
+    foreach ($comentarios as &$c) {
+        $c['reacciones'] = $reacciones_por_com[(int) $c['id']] ?? [];
+    }
+    unset($c);
+
+    return $comentarios;
 }
 
 function cargar_historial(int $incidencia_id): array {

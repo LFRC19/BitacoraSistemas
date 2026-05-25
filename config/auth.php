@@ -9,6 +9,7 @@
  */
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/sesiones_helpers.php';
 
 // --- Configuración de sesión segura ---
 if (session_status() === PHP_SESSION_NONE) {
@@ -28,7 +29,7 @@ define('TIEMPO_SESION_INACTIVA_MIN', 120); // 2 horas de inactividad
  * (por ejemplo se agregan o quitan campos en login()), INCREMENTAR este número.
  * Esto fuerza un logout automático de sesiones viejas que tengan estructura distinta.
  */
-define('SESSION_VERSION', 2);
+define('SESSION_VERSION', 4);
 
 /**
  * Intenta iniciar sesión con usuario y contraseña.
@@ -99,13 +100,17 @@ function login(string $usuario, string $password): array {
         'id'             => (int) $row['id'],
         'usuario'        => $row['usuario'],
         'nombre'         => $row['nombre_completo'],
+        'nombre_completo'=> $row['nombre_completo'],
         'email'          => $row['email'],
+        'telefono'       => $row['telefono'] ?? null,
         'rol_id'         => (int) $row['rol_id'],
         'rol_nombre'     => $row['rol_nombre'],
         'sucursal_id'    => $row['sucursal_id'] ? (int) $row['sucursal_id'] : null,
         'area_id'        => $row['area_id'] ? (int) $row['area_id'] : null,
         'puesto'         => $row['puesto'],
-        'avatar'         => $row['avatar'],
+        'avatar_url'     => $row['avatar_url'] ?? null,
+        'pagina_inicio_preferida' => $row['pagina_inicio_preferida'] ?? 'dashboard.php',
+        'tema_preferido' => $row['tema_preferido'] ?? 'auto',
         'permisos' => [
             'administrar'         => (bool) $row['puede_administrar'],
             'ver_todas_sucursales'=> (bool) $row['puede_ver_todas_sucursales'],
@@ -121,6 +126,9 @@ function login(string $usuario, string $password): array {
     // Auditoría
     registrar_auditoria('login', null, null, 'Inicio de sesión exitoso');
 
+    // Registrar la sesión activa en BD (para tracking y cierre remoto)
+    registrar_sesion_activa((int) $row['id']);
+
     return [true, 'Bienvenido, ' . $row['nombre_completo'], (bool) $row['debe_cambiar_password']];
 }
 
@@ -134,6 +142,9 @@ function logout(): void {
     if (isset($_SESSION['usuario']['id'])) {
         registrar_auditoria('logout', null, null, 'Cierre de sesión');
     }
+    // Marcar la sesión como cerrada en BD
+    cerrar_sesion_actual('logout normal');
+
     $_SESSION = [];
     if (ini_get('session.use_cookies')) {
         $params = session_get_cookie_params();
@@ -147,14 +158,15 @@ function logout(): void {
 
 /**
  * Limpia la sesión actual sin destruir la cookie ni auditar.
- * Uso interno: invalidar sesiones desactualizadas sin causar recursión.
+ * Uso interno: invalidar sesiones desactualizadas sin causar recursión
+ * ni romper la sesión activa (no regenera ID porque interactúa mal con use_strict_mode).
  */
 function limpiar_sesion_invalida(): void {
-    $_SESSION = [];
-    // Forzar regeneración para evitar reusar el mismo ID
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        @session_regenerate_id(true);
-    }
+    // Solo limpiamos los datos de aplicación; el ID de sesión se mantiene
+    // para que la próxima llamada a login() lo pueda regenerar normalmente.
+    unset($_SESSION['usuario']);
+    unset($_SESSION['ultima_actividad']);
+    unset($_SESSION['version']);
 }
 
 /**
@@ -184,6 +196,15 @@ function esta_logueado(): bool {
             limpiar_sesion_invalida();
             return false;
         }
+    }
+
+    // Verificar que la sesión sigue activa en BD (admin pudo cerrarla remotamente)
+    $estado = sesion_sigue_activa();
+    if (!$estado['activa']) {
+        // Guardar motivo para mostrarlo en la pantalla de login si se quiere
+        $_SESSION['motivo_cierre_forzado'] = $estado['motivo'] ?? 'sesión cerrada por administrador';
+        limpiar_sesion_invalida();
+        return false;
     }
 
     $_SESSION['ultima_actividad'] = time();
